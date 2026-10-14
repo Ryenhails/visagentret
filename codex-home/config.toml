@@ -1,0 +1,20 @@
+# Codex config for VisAgentRet episodes (a self-hosted vLLM server behind src/gw_proxy.py).
+# bin/codex-gw copies this into the container's CODEX_HOME before every episode.
+
+model_catalog_json = "models.json"
+model = "zai-org/GLM-5.3-Flash"
+model_provider = "selfhost"
+
+# Unattended episodes: nothing can be approved, so never ask; the agent may
+# write only in its run directory, has no network, and reads the corpus at /corpus.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+# No shell_environment_policy here: Codex 0.156 ignored it (the agent's shell saw
+# every variable). The real key is kept out of the container by src/gw_proxy.py.
+
+[model_providers.selfhost]
+name = "Self-hosted vLLM"
+base_url = "http://127.0.0.1:8000/v1"  # bin/codex-gw overrides this with the localhost proxy
+env_key = "VISAGENTRET_LLM_TOKEN"
+wire_api = "responses"

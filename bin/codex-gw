@@ -1,0 +1,60 @@
+#!/bin/bash
+# Run `codex exec` for one benchmark episode inside the Codex Apptainer image
+# (containers/codex.def). Called by src/episode.py.
+#
+#   CODEX_GW_CORPUS=<dir> CODEX_GW_PORT=<port> CODEX_GW_TOKEN=<token> \
+#       codex-gw <run_dir> [codex exec args...]        (prompt on stdin)
+#
+#   CODEX_SIF           the Codex image (required)
+#   CODEX_GW_STATE_DIR  Codex home outside the container (default ~/.cache/visagentret/codex-home)
+#
+# The LLM server's key never enters the container: Codex talks to the
+# localhost proxy in src/gw_proxy.py (started by the pipeline) with a per-run
+# session token, and the proxy swaps in the real key.
+# (Codex 0.156 passes its whole environment to the agent's shell regardless of
+# shell_environment_policy -- checked on 2026-10-09 -- so the token is visible
+# to the agent; that shell has no network, so it cannot use it.)
+#
+# Inside the container only <run_dir> (writable, cwd) and $CODEX_GW_CORPUS
+# (read-only, at /corpus) are visible, plus the Codex home in $STATE_DIR.
+set -euo pipefail
+
+SIF=${CODEX_SIF:?set CODEX_SIF to the Codex image (containers/codex.def)}
+STATE_DIR=${CODEX_GW_STATE_DIR:-$HOME/.cache/visagentret/codex-home}
+CONF_SRC=$(cd "$(dirname "$0")/../codex-home" && pwd -P)
+
+RUN_DIR=$(cd "$1" && pwd -P); shift
+CORPUS=$(cd "${CODEX_GW_CORPUS:?set CODEX_GW_CORPUS}" && pwd -P)
+: "${CODEX_GW_PORT:?set CODEX_GW_PORT (start src/gw_proxy.py)}" "${CODEX_GW_TOKEN:?set CODEX_GW_TOKEN}"
+
+if ! command -v apptainer >/dev/null 2>&1; then
+    module load apptainer
+fi
+
+# Codex home: config + model catalog are copied from the project so they are versioned there
+mkdir -p "$STATE_DIR/.codex"
+chmod 700 "$STATE_DIR"
+cp "$CONF_SRC/config.toml" "$CONF_SRC/models.json" "$STATE_DIR/.codex/"
+
+export APPTAINERENV_VISAGENTRET_LLM_TOKEN=$CODEX_GW_TOKEN
+
+# optional MCP tool scripts (e.g. tools/mcp_vdr.py), visible read-only at /tools
+TOOLS_BIND=()
+if [ -n "${CODEX_GW_TOOLS:-}" ]; then
+    TOOLS_BIND=(--bind "$(cd "$CODEX_GW_TOOLS" && pwd -P):/tools:ro")
+fi
+
+# /dev/full + unshare: needed for Codex's bubblewrap sandbox under Apptainer
+exec apptainer exec \
+    --containall \
+    --bind /dev/full \
+    --home "$STATE_DIR:/home/node" \
+    --bind "$RUN_DIR" \
+    --bind "$CORPUS:/corpus:ro" \
+    ${TOOLS_BIND[@]+"${TOOLS_BIND[@]}"} \
+    --pwd "$RUN_DIR" \
+    "$SIF" \
+    unshare --user --map-current-user --mount --propagation private \
+    codex exec --skip-git-repo-check --ephemeral \
+    -c "model_providers.selfhost.base_url=\"http://127.0.0.1:${CODEX_GW_PORT}${CODEX_GW_BASE_PATH:-/api/v1}\"" \
+    "$@"

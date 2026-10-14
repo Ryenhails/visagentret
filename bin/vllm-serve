@@ -1,0 +1,37 @@
+#!/bin/bash
+# Start an OpenAI-compatible vLLM server (v0.30.0 image) on this node's loopback.
+#
+#   VLLM_API_KEY=<token> vllm-serve <port> <served-name> <model> [extra vllm serve args...]
+#
+#   VLLM_SIF  Apptainer image built from docker://vllm/vllm-openai:v0.30.0 (required)
+#   HF_HOME   Hugging Face cache that holds the model, read offline (default ~/.cache/huggingface)
+#
+# The container home and the compile caches vLLM / torch / triton / flashinfer write (thousands of
+# small files) go to node-local /tmp: they are rebuilt on each new node (minutes).
+# The key is read by vLLM from VLLM_API_KEY in the environment (never on the command line).
+set -euo pipefail
+: "${VLLM_SIF:?set VLLM_SIF to the vllm-openai v0.30.0 image}"
+HF_HOME=${HF_HOME:-$HOME/.cache/huggingface}
+PORT=$1; NAME=$2; MODEL=$3; shift 3
+: "${VLLM_API_KEY:?set VLLM_API_KEY}"
+LOCAL=/tmp/${USER}_vllm_${SLURM_JOB_ID:-x}  # per job: two jobs may share a node
+VHOME=$LOCAL/home
+mkdir -p "$VHOME" "$LOCAL/cache" "$LOCAL/tmp"
+command -v apptainer >/dev/null 2>&1 || module load apptainer
+
+export HF_HOME HF_HUB_OFFLINE=1
+# set every cache variable, so no older setting from the host reaches the container
+export HF_HUB_CACHE=$HF_HOME/hub HUGGINGFACE_HUB_CACHE=$HF_HOME/hub TRANSFORMERS_CACHE=$HF_HOME/hub
+export XDG_CACHE_HOME=$LOCAL/cache VLLM_CACHE_ROOT=$LOCAL/cache/vllm
+export TRITON_CACHE_DIR=$LOCAL/cache/triton TORCHINDUCTOR_CACHE_DIR=$LOCAL/cache/inductor
+export TMPDIR=$LOCAL/tmp
+# Host compiler-module variables must not reach the container: Triton builds its CUDA helpers at startup with
+# the image's gcc, and the gcc module's CC/CXX point at host binaries, while its GCC_ROOT makes the image's gcc
+# drop its own include dir ("stddef.h: No such file or directory"; found 2026-10-10)
+unset CC CXX FC F77 GCC_ROOT GCC_RUNTIME_ROOT CPATH LIBRARY_PATH
+
+exec apptainer exec --nv \
+    --home "$VHOME" \
+    --bind "$HF_HOME" --bind "$LOCAL" \
+    "$VLLM_SIF" \
+    vllm serve "$MODEL" --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "$@"
